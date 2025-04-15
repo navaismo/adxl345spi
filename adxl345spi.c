@@ -17,7 +17,8 @@
 #define POWER_CTL     0x2D
 #define DATAX0        0x32
 
-const char codeVersion[4] = "0.4";
+#define CODE_VERSION "0.4"
+
 const int freqDefault = 250;
 const int freqMax = 3200;
 const int speedSPI = 2000000;
@@ -37,7 +38,7 @@ void printUsage() {
            "Usage: adxl345spi [OPTION]...\n"
            "  -s, --save FILE     Save data to specified FILE\n"
            "  -f, --freq FREQ     Sampling rate in Hz (default: %d, max: %d)\n",
-           codeVersion, freqDefault, freqMax);
+           CODE_VERSION, freqDefault, freqMax);
 }
 
 int kbhit() {
@@ -133,7 +134,8 @@ int main(int argc, char *argv[]) {
             time_sleep(coldStartDelay);
         }
 
-        printf("Press 'Q' to stop or Ctrl+C\n");
+        printf("Press Q to stop");
+        printf("\n");
         double tStart = time_time();
         int samples = 0;
         double t = 0;
@@ -164,82 +166,90 @@ int main(int argc, char *argv[]) {
         return 0;
 
     } else {
-        int maxSamples = freqMaxSPI * 60;
-        double *rt = malloc(maxSamples * sizeof(double));
-        double *rx = malloc(maxSamples * sizeof(double));
-        double *ry = malloc(maxSamples * sizeof(double));
-        double *rz = malloc(maxSamples * sizeof(double));
+        printf("Press Q to stop\n");
 
-        printf("Press 'Q' to stop or Ctrl+C\n");
-        double tStart = time_time();
-        double t = 0;
-        int samplesRead = 0;
+        FILE *f = fopen(vSave, "w");
+        if (!f) {
+            perror("Failed to open file");
+            gpioTerminate();
+            return 1;
+        }
+        fprintf(f, "time,x,y,z\n");
+
+        const int flushEvery = 1000;
+        int bufferIndex = 0;
+        int totalSamples = 0;
+        double delay = 1.0 / vFreq;
+
+        double *bt = malloc(sizeof(double) * flushEvery);
+        double *bx = malloc(sizeof(double) * flushEvery);
+        double *by = malloc(sizeof(double) * flushEvery);
+        double *bz = malloc(sizeof(double) * flushEvery);
+
+        if (!bt || !bx || !by || !bz) {
+            perror("Failed to allocate buffer");
+            fclose(f);
+            gpioTerminate();
+            return 1;
+        }
+
         int16_t x, y, z;
+        double tStart = time_time();
+        double tNow, tElapsed, nextSample = 0;
 
-        while (keepRunning && samplesRead < maxSamples) {
+        while (keepRunning) {
+            tNow = time_time() - tStart;
+            if (tNow < nextSample)
+                continue;
+
             if (kbhit()) {
                 char ch = getchar();
                 if (ch == 'q' || ch == 'Q') break;
             }
 
+            nextSample += delay; // exact next sampling time
+
+            // Read one sample
+            char data[7];
             data[0] = DATAX0;
             if (readBytes(h, data, 7) == 7) {
                 x = (data[2] << 8) | data[1];
                 y = (data[4] << 8) | data[3];
                 z = (data[6] << 8) | data[5];
-                t = time_time() - tStart;
-                rx[samplesRead] = x * accConversion;
-                ry[samplesRead] = y * accConversion;
-                rz[samplesRead] = z * accConversion;
-                rt[samplesRead] = t;
-                samplesRead++;
+
+                double t = time_time() - tStart;
+                bt[bufferIndex] = t;
+                bx[bufferIndex] = x * accConversion;
+                by[bufferIndex] = y * accConversion;
+                bz[bufferIndex] = z * accConversion;
+                bufferIndex++;
+                totalSamples++;
+            }
+
+            if (bufferIndex >= flushEvery) {
+                for (i = 0; i < flushEvery; i++) {
+                    fprintf(f, "%.5f,%.5f,%.5f,%.5f\n", bt[i], bx[i], by[i], bz[i]);
+                }
+                fflush(f);
+                bufferIndex = 0;
             }
         }
 
-        double tElapsed = time_time() - tStart;
-        gpioTerminate();
-
-        int targetSamples = (int)(tElapsed * vFreq);
-        double *at = malloc(targetSamples * sizeof(double));
-        double *ax = malloc(targetSamples * sizeof(double));
-        double *ay = malloc(targetSamples * sizeof(double));
-        double *az = malloc(targetSamples * sizeof(double));
-
-        int jClosest = 0;
-        for (i = 0; i < targetSamples; i++) {
-            double targetTime = i * delay;
-            double bestError = fabs(rt[jClosest] - targetTime);
-            for (int j = jClosest; j < samplesRead; j++) {
-                double err = fabs(rt[j] - targetTime);
-                if (err < bestError) {
-                    bestError = err;
-                    jClosest = j;
-                } else break;
-            }
-            at[i] = targetTime;
-            ax[i] = rx[jClosest];
-            ay[i] = ry[jClosest];
-            az[i] = rz[jClosest];
+        // Write remaining samples
+        for (i = 0; i < bufferIndex; i++) {
+            fprintf(f, "%.5f,%.5f,%.5f,%.5f\n", bt[i], bx[i], by[i], bz[i]);
         }
-
-        FILE *f = fopen(vSave, "w");
-        if (!f) {
-            perror("Failed to open file");
-            return 1;
-        }
-        fprintf(f, "time,x,y,z\n");
-        for (i = 0; i < targetSamples; i++) {
-            fprintf(f, "%.5f,%.5f,%.5f,%.5f\n", at[i], ax[i], ay[i], az[i]);
-        }
+        fflush(f);
         fclose(f);
 
-        free(rt); free(rx); free(ry); free(rz);
-        free(at); free(ax); free(ay); free(az);
-
+        free(bt); free(bx); free(by); free(bz);
+        tElapsed = time_time() - tStart;
+        gpioTerminate();
         printf("Saved %d samples in %.2f seconds (%.1f Hz) to %s\n",
-               targetSamples, tElapsed, targetSamples / tElapsed, vSave);
+               totalSamples, tElapsed, totalSamples / tElapsed, vSave);
     }
+
+
 
     return 0;
 }
-
