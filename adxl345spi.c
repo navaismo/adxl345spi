@@ -24,7 +24,6 @@
 const int freqDefault = 250;
 const int freqMax = 3200;
 const int speedSPI = 2000000;
-const int freqMaxSPI = 100000;
 const int coldStartSamples = 2;
 const double coldStartDelay = 0.1;
 const double accConversion = 2 * 16.0 / 8192.0;
@@ -118,12 +117,14 @@ int main(int argc, char *argv[]) {
     char devid_check[2] = { DEVID | READ_BIT, 0x00 };
     if (spiXfer(h, devid_check, devid_check, 2) != 2) {
         fprintf(stderr, "Failed to read device ID from ADXL345.\n");
+        spiClose(h);
         gpioTerminate();
         return 1;
     }
     if ((unsigned char)devid_check[1] != EXPECTED_DEVID) {
         fprintf(stderr, "Unexpected device ID: 0x%02X (expected 0x%02X)\n",
                 (unsigned char)devid_check[1], EXPECTED_DEVID);
+        spiClose(h);
         gpioTerminate();
         return 1;
     }
@@ -178,6 +179,7 @@ int main(int argc, char *argv[]) {
 
         double tElapsed = time_time() - tStart;
         printf("Captured %d samples in %.2f seconds (%.1f Hz)\n", samples, tElapsed, samples / tElapsed);
+        spiClose(h);
         gpioTerminate();
         return 0;
 
@@ -187,6 +189,7 @@ int main(int argc, char *argv[]) {
         FILE *f = fopen(vSave, "w");
         if (!f) {
             perror("Failed to open file");
+            spiClose(h);
             gpioTerminate();
             return 1;
         }
@@ -195,7 +198,6 @@ int main(int argc, char *argv[]) {
         const int flushEvery = 1000;
         int bufferIndex = 0;
         int totalSamples = 0;
-        double delay = 1.0 / vFreq;
 
         double *bt = malloc(sizeof(double) * flushEvery);
         double *bx = malloc(sizeof(double) * flushEvery);
@@ -205,6 +207,7 @@ int main(int argc, char *argv[]) {
         if (!bt || !bx || !by || !bz) {
             perror("Failed to allocate buffer");
             fclose(f);
+            spiClose(h);
             gpioTerminate();
             return 1;
         }
@@ -226,7 +229,6 @@ int main(int argc, char *argv[]) {
             nextSample += delay; // exact next sampling time
 
             // Read one sample
-            char data[7];
             data[0] = DATAX0;
             if (readBytes(h, data, 7) == 7) {
                 x = (data[2] << 8) | data[1];
@@ -260,12 +262,11 @@ int main(int argc, char *argv[]) {
 
         free(bt); free(bx); free(by); free(bz);
         tElapsed = time_time() - tStart;
+        spiClose(h);
         gpioTerminate();
         printf("Saved %d samples in %.2f seconds (%.1f Hz) to %s\n",
                totalSamples, tElapsed, totalSamples / tElapsed, vSave);
     }
-
-
 
     return 0;
 }
