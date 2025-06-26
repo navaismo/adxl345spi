@@ -9,13 +9,15 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-#define DATA_FORMAT   0x31
-#define DATA_FORMAT_B 0x0B
-#define READ_BIT      0x80
-#define MULTI_BIT     0x40
-#define BW_RATE       0x2C
-#define POWER_CTL     0x2D
-#define DATAX0        0x32
+#define DATA_FORMAT    0x31
+#define DATA_FORMAT_B  0x0B
+#define READ_BIT       0x80
+#define MULTI_BIT      0x40
+#define BW_RATE        0x2C
+#define POWER_CTL      0x2D
+#define DATAX0         0x32
+#define DEVID          0x00
+#define EXPECTED_DEVID 0xE5
 
 #define CODE_VERSION "0.4"
 
@@ -112,6 +114,20 @@ int main(int argc, char *argv[]) {
     }
 
     int h = spiOpen(0, speedSPI, 3);
+
+    char devid_check[2] = { DEVID | READ_BIT, 0x00 };
+    if (spiXfer(h, devid_check, devid_check, 2) != 2) {
+        fprintf(stderr, "Failed to read device ID from ADXL345.\n");
+        gpioTerminate();
+        return 1;
+    }
+    if ((unsigned char)devid_check[1] != EXPECTED_DEVID) {
+        fprintf(stderr, "Unexpected device ID: 0x%02X (expected 0x%02X)\n",
+                (unsigned char)devid_check[1], EXPECTED_DEVID);
+        gpioTerminate();
+        return 1;
+    }
+
     char data[7];
 
     // Configure ADXL345
