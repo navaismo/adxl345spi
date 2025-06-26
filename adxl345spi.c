@@ -64,13 +64,19 @@ int kbhit() {
 }
 
 int readBytes(int handle, char *data, int count) {
+    char address = data[0];
     data[0] |= READ_BIT;
-    if (count > 1) data[0] |= MULTI_BIT;
+ 
+    // Set MUTI_BIT only for sequential reads from DATAX0
+    if (address == DATAX0) {
+        data[0] |= MULTI_BIT;
+    }
+
     return spiXfer(handle, data, data, count);
 }
 
 int writeBytes(int handle, char *data, int count) {
-    if (count > 1) data[0] |= MULTI_BIT;
+    // MULTI_BIT is only used for multi-byte READs.
     return spiWrite(handle, data, count);
 }
 
