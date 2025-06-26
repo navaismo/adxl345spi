@@ -134,13 +134,30 @@ int main(int argc, char *argv[]) {
     // Configure ADXL345
     data[0] = BW_RATE;
     data[1] = 0x0F;
-    writeBytes(h, data, 2);
+    if (writeBytes(h, data, 2) != 2) {
+        fprintf(stderr, "Failed to write BW_RATE register (0x%02X)\n", BW_RATE);
+        spiClose(h);
+        gpioTerminate();
+        return 1;
+    }
+
     data[0] = DATA_FORMAT;
     data[1] = DATA_FORMAT_B;
-    writeBytes(h, data, 2);
+    if (writeBytes(h, data, 2) != 2) {
+        fprintf(stderr, "Failed to write DATA_FORMAT register (0x%02X)\n", DATA_FORMAT);
+        spiClose(h);
+        gpioTerminate();
+        return 1;
+    }
+
     data[0] = POWER_CTL;
     data[1] = 0x08;
-    writeBytes(h, data, 2);
+    if (writeBytes(h, data, 2) != 2) {
+        fprintf(stderr, "Failed to write POWER_CTL register (0x%02X)\n", POWER_CTL);
+        spiClose(h);
+        gpioTerminate();
+        return 1;
+    }
 
     double delay = 1.0 / vFreq;
 
