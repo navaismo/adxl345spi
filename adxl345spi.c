@@ -38,7 +38,8 @@ void printUsage() {
     printf("adxl345spi (version %s)\n"
            "Usage: adxl345spi [OPTION]...\n"
            "  -s, --save FILE     Save data to specified FILE\n"
-           "  -f, --freq FREQ     Sampling rate in Hz (default: %d, max: %d)\n",
+           "  -f, --freq FREQ     Sampling rate in Hz (default: %d, max: %d)\n"
+           "  -t, --time SECONDS  Stop after SECONDS seconds\n",
            CODE_VERSION, freqDefault, freqMax);
 }
 
@@ -78,6 +79,7 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, intHandler);  // handle Ctrl+C
 
     int bSave = 0;
+    int duration = 0;
     char vSave[256] = "";
     double vFreq = freqDefault;
 
@@ -95,6 +97,17 @@ int main(int argc, char *argv[]) {
                 vFreq = atof(argv[++i]);
                 if (vFreq < 1 || vFreq > freqMax) {
                     printf("Invalid frequency. Must be between 1 and %d Hz.\n", freqMax);
+                    return 1;
+                }
+            } else {
+                printUsage();
+                return 1;
+            }
+        } else if ((strcmp(argv[i], "-t") == 0) || (strcmp(argv[i], "--time") == 0)){
+            if (i + 1 < argc) {
+                duration = atoi(argv[++i]);
+                if (duration < 1) {
+                    printf("Invalid duration.\n");
                     return 1;
                 }
             } else {
@@ -171,11 +184,15 @@ int main(int argc, char *argv[]) {
         printf("Press Q to stop");
         printf("\n");
         double tStart = time_time();
+        double tNow, tElapsed = 0;
         int samples = 0;
         double t = 0;
         int16_t x, y, z;
 
         while (keepRunning) {
+            tNow = time_time();
+            tElapsed = tNow - tStart;
+            if (duration > 0 && tElapsed >= duration) break;
             if (kbhit()) {
                 char ch = getchar();
                 if (ch == 'q' || ch == 'Q') break;
@@ -194,7 +211,7 @@ int main(int argc, char *argv[]) {
             time_sleep(delay);
         }
 
-        double tElapsed = time_time() - tStart;
+        tElapsed = time_time() - tStart;
         printf("Captured %d samples in %.2f seconds (%.1f Hz)\n", samples, tElapsed, samples / tElapsed);
         spiClose(h);
         gpioTerminate();
@@ -231,9 +248,12 @@ int main(int argc, char *argv[]) {
 
         int16_t x, y, z;
         double tStart = time_time();
-        double tNow, tElapsed, nextSample = 0;
+        double tNow, tElapsed = 0, nextSample = 0;
 
         while (keepRunning) {
+            tNow = time_time();
+            tElapsed = tNow - tStart;
+            if (duration > 0 && tElapsed >= duration) break;
             tNow = time_time() - tStart;
             if (tNow < nextSample)
                 continue;
