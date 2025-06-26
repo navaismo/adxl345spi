@@ -9,20 +9,21 @@
 #include <unistd.h>
 #include <fcntl.h>
 
-#define DATA_FORMAT   0x31
-#define DATA_FORMAT_B 0x0B
-#define READ_BIT      0x80
-#define MULTI_BIT     0x40
-#define BW_RATE       0x2C
-#define POWER_CTL     0x2D
-#define DATAX0        0x32
+#define DATA_FORMAT    0x31
+#define DATA_FORMAT_B  0x0B
+#define READ_BIT       0x80
+#define MULTI_BIT      0x40
+#define BW_RATE        0x2C
+#define POWER_CTL      0x2D
+#define DATAX0         0x32
+#define DEVID          0x00
+#define EXPECTED_DEVID 0xE5
 
 #define CODE_VERSION "0.4"
 
 const int freqDefault = 250;
 const int freqMax = 3200;
 const int speedSPI = 2000000;
-const int freqMaxSPI = 100000;
 const int coldStartSamples = 2;
 const double coldStartDelay = 0.1;
 const double accConversion = 2 * 16.0 / 8192.0;
@@ -37,7 +38,8 @@ void printUsage() {
     printf("adxl345spi (version %s)\n"
            "Usage: adxl345spi [OPTION]...\n"
            "  -s, --save FILE     Save data to specified FILE\n"
-           "  -f, --freq FREQ     Sampling rate in Hz (default: %d, max: %d)\n",
+           "  -f, --freq FREQ     Sampling rate in Hz (default: %d, max: %d)\n"
+           "  -t, --time SECONDS  Stop after SECONDS seconds\n",
            CODE_VERSION, freqDefault, freqMax);
 }
 
@@ -62,13 +64,19 @@ int kbhit() {
 }
 
 int readBytes(int handle, char *data, int count) {
+    char address = data[0];
     data[0] |= READ_BIT;
-    if (count > 1) data[0] |= MULTI_BIT;
+ 
+    // Set MUTI_BIT only for sequential reads from DATAX0
+    if (address == DATAX0) {
+        data[0] |= MULTI_BIT;
+    }
+
     return spiXfer(handle, data, data, count);
 }
 
 int writeBytes(int handle, char *data, int count) {
-    if (count > 1) data[0] |= MULTI_BIT;
+    // MULTI_BIT is only used for multi-byte READs.
     return spiWrite(handle, data, count);
 }
 
@@ -77,6 +85,7 @@ int main(int argc, char *argv[]) {
     signal(SIGINT, intHandler);  // handle Ctrl+C
 
     int bSave = 0;
+    int duration = 0;
     char vSave[256] = "";
     double vFreq = freqDefault;
 
@@ -100,6 +109,17 @@ int main(int argc, char *argv[]) {
                 printUsage();
                 return 1;
             }
+        } else if ((strcmp(argv[i], "-t") == 0) || (strcmp(argv[i], "--time") == 0)){
+            if (i + 1 < argc) {
+                duration = atoi(argv[++i]);
+                if (duration < 1) {
+                    printf("Invalid duration.\n");
+                    return 1;
+                }
+            } else {
+                printUsage();
+                return 1;
+            }
         } else {
             printUsage();
             return 1;
@@ -112,18 +132,51 @@ int main(int argc, char *argv[]) {
     }
 
     int h = spiOpen(0, speedSPI, 3);
+
+    char devid_check[2] = { DEVID | READ_BIT, 0x00 };
+    if (spiXfer(h, devid_check, devid_check, 2) != 2) {
+        fprintf(stderr, "Failed to read device ID from ADXL345.\n");
+        spiClose(h);
+        gpioTerminate();
+        return 1;
+    }
+    if ((unsigned char)devid_check[1] != EXPECTED_DEVID) {
+        fprintf(stderr, "Unexpected device ID: 0x%02X (expected 0x%02X)\n",
+                (unsigned char)devid_check[1], EXPECTED_DEVID);
+        spiClose(h);
+        gpioTerminate();
+        return 1;
+    }
+
     char data[7];
 
     // Configure ADXL345
     data[0] = BW_RATE;
     data[1] = 0x0F;
-    writeBytes(h, data, 2);
+    if (writeBytes(h, data, 2) != 2) {
+        fprintf(stderr, "Failed to write BW_RATE register (0x%02X)\n", BW_RATE);
+        spiClose(h);
+        gpioTerminate();
+        return 1;
+    }
+
     data[0] = DATA_FORMAT;
     data[1] = DATA_FORMAT_B;
-    writeBytes(h, data, 2);
+    if (writeBytes(h, data, 2) != 2) {
+        fprintf(stderr, "Failed to write DATA_FORMAT register (0x%02X)\n", DATA_FORMAT);
+        spiClose(h);
+        gpioTerminate();
+        return 1;
+    }
+
     data[0] = POWER_CTL;
     data[1] = 0x08;
-    writeBytes(h, data, 2);
+    if (writeBytes(h, data, 2) != 2) {
+        fprintf(stderr, "Failed to write POWER_CTL register (0x%02X)\n", POWER_CTL);
+        spiClose(h);
+        gpioTerminate();
+        return 1;
+    }
 
     double delay = 1.0 / vFreq;
 
@@ -137,11 +190,15 @@ int main(int argc, char *argv[]) {
         printf("Press Q to stop");
         printf("\n");
         double tStart = time_time();
+        double tNow, tElapsed = 0;
         int samples = 0;
         double t = 0;
         int16_t x, y, z;
 
         while (keepRunning) {
+            tNow = time_time();
+            tElapsed = tNow - tStart;
+            if (duration > 0 && tElapsed >= duration) break;
             if (kbhit()) {
                 char ch = getchar();
                 if (ch == 'q' || ch == 'Q') break;
@@ -160,8 +217,9 @@ int main(int argc, char *argv[]) {
             time_sleep(delay);
         }
 
-        double tElapsed = time_time() - tStart;
+        tElapsed = time_time() - tStart;
         printf("Captured %d samples in %.2f seconds (%.1f Hz)\n", samples, tElapsed, samples / tElapsed);
+        spiClose(h);
         gpioTerminate();
         return 0;
 
@@ -171,6 +229,7 @@ int main(int argc, char *argv[]) {
         FILE *f = fopen(vSave, "w");
         if (!f) {
             perror("Failed to open file");
+            spiClose(h);
             gpioTerminate();
             return 1;
         }
@@ -179,7 +238,6 @@ int main(int argc, char *argv[]) {
         const int flushEvery = 1000;
         int bufferIndex = 0;
         int totalSamples = 0;
-        double delay = 1.0 / vFreq;
 
         double *bt = malloc(sizeof(double) * flushEvery);
         double *bx = malloc(sizeof(double) * flushEvery);
@@ -189,15 +247,19 @@ int main(int argc, char *argv[]) {
         if (!bt || !bx || !by || !bz) {
             perror("Failed to allocate buffer");
             fclose(f);
+            spiClose(h);
             gpioTerminate();
             return 1;
         }
 
         int16_t x, y, z;
         double tStart = time_time();
-        double tNow, tElapsed, nextSample = 0;
+        double tNow, tElapsed = 0, nextSample = 0;
 
         while (keepRunning) {
+            tNow = time_time();
+            tElapsed = tNow - tStart;
+            if (duration > 0 && tElapsed >= duration) break;
             tNow = time_time() - tStart;
             if (tNow < nextSample)
                 continue;
@@ -210,7 +272,6 @@ int main(int argc, char *argv[]) {
             nextSample += delay; // exact next sampling time
 
             // Read one sample
-            char data[7];
             data[0] = DATAX0;
             if (readBytes(h, data, 7) == 7) {
                 x = (data[2] << 8) | data[1];
@@ -244,12 +305,11 @@ int main(int argc, char *argv[]) {
 
         free(bt); free(bx); free(by); free(bz);
         tElapsed = time_time() - tStart;
+        spiClose(h);
         gpioTerminate();
         printf("Saved %d samples in %.2f seconds (%.1f Hz) to %s\n",
                totalSamples, tElapsed, totalSamples / tElapsed, vSave);
     }
-
-
 
     return 0;
 }
