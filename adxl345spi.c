@@ -8,6 +8,7 @@
 #include <termios.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
 
 #define DATA_FORMAT    0x31
 #define DATA_FORMAT_B  0x0B
@@ -29,6 +30,7 @@ const double coldStartDelay = 0.1;
 const double accConversion = 2 * 16.0 / 8192.0;
 
 volatile sig_atomic_t keepRunning = 1;
+struct termios orig_term;
 
 void intHandler(int dummy) {
     keepRunning = 0;
@@ -43,13 +45,19 @@ void printUsage() {
            CODE_VERSION, freqDefault, freqMax);
 }
 
+void cleanup(int h) {
+    tcsetattr(STDIN_FILENO, TCSANOW, &orig_term);
+    if (h >= 0) spiClose(h);
+    gpioTerminate();
+}
+
 int kbhit() {
     struct termios oldt, newt;
     int ch;
     int oldf;
     tcgetattr(STDIN_FILENO, &oldt);
     newt = oldt;
-    newt.c_lflag &= ~(ICANON | ECHO);
+    newt.c_lflag &= ~(ICANON);
     tcsetattr(STDIN_FILENO, TCSANOW, &newt);
     oldf = fcntl(STDIN_FILENO, F_GETFL, 0);
     fcntl(STDIN_FILENO, F_SETFL, oldf | O_NONBLOCK);
@@ -67,7 +75,7 @@ int readBytes(int handle, char *data, int count) {
     char address = data[0];
     data[0] |= READ_BIT;
  
-    // Set MUTI_BIT only for sequential reads from DATAX0
+    // Set MUTLI_BIT only for sequential reads from DATAX0
     if (address == DATAX0) {
         data[0] |= MULTI_BIT;
     }
@@ -95,6 +103,7 @@ int main(int argc, char *argv[]) {
             if (i + 1 < argc) {
                 strcpy(vSave, argv[++i]);
             } else {
+                fprintf(stderr, "Error: Missing argument for -s/--save option.\n");
                 printUsage();
                 return 1;
             }
@@ -102,49 +111,60 @@ int main(int argc, char *argv[]) {
             if (i + 1 < argc) {
                 vFreq = atof(argv[++i]);
                 if (vFreq < 1 || vFreq > freqMax) {
-                    printf("Invalid frequency. Must be between 1 and %d Hz.\n", freqMax);
+                    fprintf(stderr, "Error: Invalid frequency. Must be between 1 and %d Hz.\n", freqMax);
                     return 1;
                 }
             } else {
+                fprintf(stderr, "Error: Missing argument for -f/--freq option.\n");
                 printUsage();
                 return 1;
             }
-        } else if ((strcmp(argv[i], "-t") == 0) || (strcmp(argv[i], "--time") == 0)){
+        } else if ((strcmp(argv[i], "-t") == 0) || (strcmp(argv[i], "--time") == 0)) {
             if (i + 1 < argc) {
                 duration = atoi(argv[++i]);
                 if (duration < 1) {
-                    printf("Invalid duration.\n");
+                    fprintf(stderr, "Error: Invalid duration.\n");
                     return 1;
                 }
             } else {
+                fprintf(stderr, "Error: Missing argument for -t/--time option.\n");
                 printUsage();
                 return 1;
             }
         } else {
+            fprintf(stderr, "Error: Unknown option '%s'\n", argv[i]);
             printUsage();
             return 1;
         }
     }
 
     if (gpioInitialise() < 0) {
-        printf("GPIO initialization failed.\n");
+        fprintf(stderr, "Error: GPIO initialization failed.\n");
         return 1;
     }
 
     int h = spiOpen(0, speedSPI, 3);
-
-    char devid_check[2] = { DEVID | READ_BIT, 0x00 };
-    if (spiXfer(h, devid_check, devid_check, 2) != 2) {
-        fprintf(stderr, "Failed to read device ID from ADXL345.\n");
-        spiClose(h);
+    if (h < 0) {
+        fprintf(stderr, "Error: Failed to open SPI device.\n");
         gpioTerminate();
         return 1;
     }
+
+    tcgetattr(STDIN_FILENO, &orig_term);
+    struct termios new_term = orig_term;
+    new_term.c_lflag &= ~(ECHO);
+    tcsetattr(STDIN_FILENO, TCSANOW, &new_term);
+
+    char devid_check[2] = { DEVID | READ_BIT, 0x00 };
+    if (spiXfer(h, devid_check, devid_check, 2) != 2) {
+        fprintf(stderr, "Error: Failed to read device ID from ADXL345.\n");
+        cleanup(h);
+        return 1;
+    }
     if ((unsigned char)devid_check[1] != EXPECTED_DEVID) {
-        fprintf(stderr, "Unexpected device ID: 0x%02X (expected 0x%02X)\n",
+        fprintf(stderr, "Error: Unexpected device ID: 0x%02X (expected 0x%02X)\n",
                 (unsigned char)devid_check[1], EXPECTED_DEVID);
-        spiClose(h);
-        gpioTerminate();
+        cleanup(h);
         return 1;
     }
 
@@ -154,27 +174,24 @@ int main(int argc, char *argv[]) {
     data[0] = BW_RATE;
     data[1] = 0x0F;
     if (writeBytes(h, data, 2) != 2) {
-        fprintf(stderr, "Failed to write BW_RATE register (0x%02X)\n", BW_RATE);
-        spiClose(h);
-        gpioTerminate();
+        fprintf(stderr, "Error: Failed to write BW_RATE register (0x%02X)\n", BW_RATE);
+        cleanup(h);
         return 1;
     }
 
     data[0] = DATA_FORMAT;
     data[1] = DATA_FORMAT_B;
     if (writeBytes(h, data, 2) != 2) {
-        fprintf(stderr, "Failed to write DATA_FORMAT register (0x%02X)\n", DATA_FORMAT);
-        spiClose(h);
-        gpioTerminate();
+        fprintf(stderr, "Error: Failed to write DATA_FORMAT register (0x%02X)\n", DATA_FORMAT);
+        cleanup(h);
         return 1;
     }
 
     data[0] = POWER_CTL;
     data[1] = 0x08;
     if (writeBytes(h, data, 2) != 2) {
-        fprintf(stderr, "Failed to write POWER_CTL register (0x%02X)\n", POWER_CTL);
-        spiClose(h);
-        gpioTerminate();
+        fprintf(stderr, "Error: Failed to write POWER_CTL register (0x%02X)\n", POWER_CTL);
+        cleanup(h);
         return 1;
     }
 
@@ -219,8 +236,7 @@ int main(int argc, char *argv[]) {
 
         tElapsed = time_time() - tStart;
         printf("Captured %d samples in %.2f seconds (%.1f Hz)\n", samples, tElapsed, samples / tElapsed);
-        spiClose(h);
-        gpioTerminate();
+        cleanup(h);
         return 0;
 
     } else {
@@ -228,9 +244,8 @@ int main(int argc, char *argv[]) {
 
         FILE *f = fopen(vSave, "w");
         if (!f) {
-            perror("Failed to open file");
-            spiClose(h);
-            gpioTerminate();
+            fprintf(stderr, "Error: Failed to open file: %s\n", strerror(errno));
+            cleanup(h);
             return 1;
         }
         fprintf(f, "time,x,y,z\n");
@@ -245,10 +260,9 @@ int main(int argc, char *argv[]) {
         double *bz = malloc(sizeof(double) * flushEvery);
 
         if (!bt || !bx || !by || !bz) {
-            perror("Failed to allocate buffer");
+            fprintf(stderr, "Error: Failed to allocate buffer: %s\n", strerror(errno));
             fclose(f);
-            spiClose(h);
-            gpioTerminate();
+            cleanup(h);
             return 1;
         }
 
@@ -305,8 +319,7 @@ int main(int argc, char *argv[]) {
 
         free(bt); free(bx); free(by); free(bz);
         tElapsed = time_time() - tStart;
-        spiClose(h);
-        gpioTerminate();
+        cleanup(h);
         printf("Saved %d samples in %.2f seconds (%.1f Hz) to %s\n",
                totalSamples, tElapsed, totalSamples / tElapsed, vSave);
     }
